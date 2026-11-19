@@ -1,8 +1,38 @@
+import json
 import streamlit as st
 import sqlite3
 import pandas as pd
-from database import conectar_db, gerar_hash_senha
 from utils import renderizar_logo_segserra
+
+TODAS_TELAS_SISTEMA = [
+    "Dashboard",
+    "Clientes (Consulta e Cadastro)",
+    "Funil de Vendas (Pipeline)",
+    "Lançar Atividades",
+    "Agenda & Follow-ups",
+    "Emissão de Propostas",
+    "Checklist Visita Técnica",
+    "Usuários e Senhas"
+]
+
+
+def _salvar_permissoes_no_banco(perfil_alvo, telas_escolhidas, perm_editar, perm_excluir):
+    conn = conectar_db()
+    conn.execute("""
+        INSERT INTO permissoes_perfil (perfil, telas_json, pode_editar, pode_excluir)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(perfil) DO UPDATE SET
+            telas_json = excluded.telas_json,
+            pode_editar = excluded.pode_editar,
+            pode_excluir = excluded.pode_excluir
+    """, (
+        perfil_alvo,
+        json.dumps(telas_escolhidas, ensure_ascii=False),
+        1 if perm_editar else 0,
+        1 if perm_excluir else 0
+    ))
+    conn.commit()
+    conn.close()
 
 
 def renderizar_tela_login():
@@ -44,11 +74,16 @@ def renderizar_tela_login():
                             if u_ativo == 0:
                                 st.error("🚫 Este usuário está inativo. Contate o Administrador.")
                             elif gerar_hash_senha(senha_input) == u_hash:
+                                perms = obter_permissoes_perfil(u_perfil)
+                                telas_permitidas = perms.get("telas") or ["Dashboard"]
                                 st.session_state.logado = True
                                 st.session_state.usuario_id = uid
                                 st.session_state.usuario_atual = u_login
                                 st.session_state.nome_usuario = u_nome
                                 st.session_state.perfil_usuario = u_perfil
+                                st.session_state.menu_pagina = (
+                                    "Dashboard" if "Dashboard" in telas_permitidas else telas_permitidas[0]
+                                )
                                 st.rerun()
                             else:
                                 st.error("Usuário ou senha incorretos!")
@@ -57,20 +92,22 @@ def renderizar_tela_login():
 def realizar_logout():
     for chave in ["logado", "usuario_id", "usuario_atual", "nome_usuario", "perfil_usuario"]:
         st.session_state[chave] = False if chave == "logado" else None
-    st.session_state.menu_pagina = "1. Clientes (Consulta e Cadastro)"
 
 
 def renderizar_gestao_usuarios():
-    st.title("🔐 Gestão de Usuários e Senhas")
 
     perfil_logado = st.session_state.get("perfil_usuario", "Comercial / Atendimento")
+    perms_logado = obter_permissoes_perfil(perfil_logado)
+    pode_editar = perms_logado.get("pode_editar", False)
 
     if perfil_logado == "Administrador":
-        aba_equipe, aba_minha_senha = st.tabs([
             "👥 Cadastrar e Gerenciar Equipe",
+            "🛡️ Permissões por Perfil",
             "🔑 Alterar Minha Senha"
         ])
     else:
+        aba_equipe = None
+        aba_permissoes = None
         aba_minha_senha = st.container()
         aba_equipe = None
 
@@ -85,7 +122,6 @@ def renderizar_gestao_usuarios():
                     novo_nome = st.text_input("Nome Completo do Colaborador *", placeholder="Ex: João Silva")
                     novo_login = st.text_input("Login de Acesso (sem espaços) *", placeholder="Ex: joao.silva")
                     nova_senha = st.text_input("Senha Inicial *", type="password")
-                    novo_perfil = st.selectbox("Perfil de Permissão *", ["Comercial / Atendimento", "Administrador"])
 
                     btn_criar = st.form_submit_button("💾 Criar Usuário", use_container_width=True, type="primary")
                     if btn_criar:
@@ -101,7 +137,6 @@ def renderizar_gestao_usuarios():
                                 """, (login_limpo, novo_nome.strip(), gerar_hash_senha(nova_senha), novo_perfil))
                                 conn.commit()
                                 conn.close()
-                                st.success(f"✅ Usuário '{login_limpo}' criado com sucesso!")
                                 st.rerun()
                             except sqlite3.IntegrityError:
                                 st.error("Este login de usuário já existe no sistema!")
@@ -126,17 +161,11 @@ def renderizar_gestao_usuarios():
 
                 with st.form(f"form_edit_user_{uid_sel}"):
                     ed_nome = st.text_input("Nome Completo", value=u_sel["nome_completo"])
-                    perfis_lista = ["Comercial / Atendimento", "Administrador"]
-                    idx_p = perfis_lista.index(u_sel["perfil"]) if u_sel["perfil"] in perfis_lista else 0
                     ed_perfil = st.selectbox("Perfil", perfis_lista, index=idx_p)
                     ed_ativo = st.checkbox("Usuário Ativo (Permitir Login)", value=bool(u_sel["ativo"]))
-                    ed_nova_senha = st.text_input("Redefinir Senha (deixe em branco para manter a atual)",
-                                                  type="password")
 
                     c_b1, c_b2 = st.columns(2)
                     with c_b1:
-                        btn_upd = st.form_submit_button("✏️ Salvar Alterações", use_container_width=True,
-                                                        type="primary")
                     with c_b2:
                         btn_del = st.form_submit_button("🗑️ Excluir Usuário", use_container_width=True)
 
@@ -148,15 +177,12 @@ def renderizar_gestao_usuarios():
                             if ed_nova_senha.strip():
                                 conn.execute("""
                                     UPDATE usuarios SET nome_completo=?, perfil=?, ativo=?, senha_hash=? WHERE id=?
-                                """, (ed_nome.strip(), ed_perfil, int(ed_ativo),
-                                      gerar_hash_senha(ed_nova_senha.strip()), uid_sel))
                             else:
                                 conn.execute("""
                                     UPDATE usuarios SET nome_completo=?, perfil=?, ativo=? WHERE id=?
                                 """, (ed_nome.strip(), ed_perfil, int(ed_ativo), uid_sel))
                             conn.commit()
                             conn.close()
-                            st.success("Dados do usuário atualizados com sucesso!")
                             st.rerun()
 
                     if btn_del:
@@ -169,7 +195,6 @@ def renderizar_gestao_usuarios():
                             conn.execute("DELETE FROM usuarios WHERE id=?", (uid_sel,))
                             conn.commit()
                             conn.close()
-                            st.success("Usuário excluído!")
                             st.rerun()
 
             st.divider()
@@ -181,9 +206,10 @@ def renderizar_gestao_usuarios():
             })[["ID", "Nome Completo", "Login", "Perfil de Acesso", "Status"]]
             st.dataframe(df_exib, use_container_width=True, hide_index=True)
 
-    # --- ABA PARA QUALQUER USUÁRIO ALTERAR SUA PRÓPRIA SENHA ---
     with aba_minha_senha:
         st.subheader("🔑 Alterar Minha Senha de Acesso")
+        if not pode_editar and perfil_logado != "Administrador":
+            st.caption("A alteração da própria senha permanece disponível para a sua conta.")
         with st.form("form_trocar_propria_senha", clear_on_submit=True):
             senha_atual = st.text_input("Senha Atual *", type="password")
             senha_nova = st.text_input("Nova Senha *", type="password")

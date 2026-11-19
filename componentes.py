@@ -1,16 +1,17 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, time, timedelta, date
-from database import conectar_db, ETAPAS_FUNIL, OPCOES_SERVICOS
-from utils import limpar_numeros, converter_str_data, converter_str_hora
 
 
 def ir_para_lancamento_cliente(cliente_id):
     st.session_state.cliente_pre_selecionado_id = int(cliente_id)
-    st.session_state.menu_pagina = "3. Lançar Atividades"
 
 
 def alterar_etapa_funil_rapido(cliente_id, nova_etapa):
+    perms = _perms_usuario_atual()
+    if not perms.get("pode_editar", False):
+        st.error("Seu perfil não tem permissão para alterar registros já emitidos.")
+        return
     conn = conectar_db()
     conn.execute("UPDATE clientes SET etapa_funil = ? WHERE id = ?", (nova_etapa, int(cliente_id)))
     conn.commit()
@@ -18,8 +19,11 @@ def alterar_etapa_funil_rapido(cliente_id, nova_etapa):
     st.toast(f"Etapa atualizada para: {nova_etapa}")
 
 
-@st.dialog("✏️ Alterar / Excluir Cadastro da Empresa", width="large")
 def modal_editar_cliente(cliente_id):
+    perms = _perms_usuario_atual()
+    pode_editar = perms.get("pode_editar", False)
+    pode_excluir = perms.get("pode_excluir", False)
+
     conn = conectar_db()
     df_c = pd.read_sql_query("""
         SELECT c.*, COUNT(a.id) as total_atividades 
@@ -35,42 +39,30 @@ def modal_editar_cliente(cliente_id):
         return
 
     cliente_sel = df_c.iloc[0]
-    st.markdown(f"**CNPJ:** `{cliente_sel['cnpj']}` | **Atividades registradas:** `{cliente_sel['total_atividades']}`")
 
     with st.form(f"form_modal_cliente_{cliente_id}"):
-        c1, c2 = st.columns(2)
         with c1:
             nova_razao = st.text_input("Razão Social *", value=cliente_sel["razao_social"] or "")
-            novo_fantasia = st.text_input("Nome Fantasia", value=cliente_sel["nome_fantasia"] or "")
-            novo_resp = st.text_input("Responsável (PF) *", value=cliente_sel["responsavel_pf"] or "")
         with c2:
+            novo_fantasia = st.text_input("Nome Fantasia", value=cliente_sel["nome_fantasia"] or "")
+        with c3:
+            cat_atual = cliente_sel["categoria"] if cliente_sel["categoria"] in CATEGORIAS_CLIENTE else CATEGORIAS_CLIENTE[0]
+            nova_categoria = st.selectbox("Categoria *", CATEGORIAS_CLIENTE, index=CATEGORIAS_CLIENTE.index(cat_atual))
+        with c4:
+            st_raw = cliente_sel.get("status_cliente") if "status_cliente" in cliente_sel else "Ativo"
+            st_atual = st_raw if st_raw in STATUS_CLIENTE else "Ativo"
+            novo_status = st.selectbox("Status *", STATUS_CLIENTE, index=STATUS_CLIENTE.index(st_atual))
+
+        r1, r2, r3 = st.columns([1.8, 1.4, 1.5])
+        with r1:
+            novo_resp = st.text_input("Responsável (PF) *", value=cliente_sel["responsavel_pf"] or "")
             novo_tel = st.text_input("Telefone / WhatsApp", value=cliente_sel["telefone"] or "")
+        with r3:
             novo_email = st.text_input("E-mail", value=cliente_sel["email"] or "")
 
-        st.markdown("##### 📊 Posição no Funil e Próximo Contato (Follow-up)")
-        f1, f2, f3, f4 = st.columns([1.6, 1.1, 1.8, 1.2])
-        etapa_atual = cliente_sel["etapa_funil"] if cliente_sel["etapa_funil"] in ETAPAS_FUNIL else ETAPAS_FUNIL[0]
-        serv_atual = cliente_sel["servico_interesse"] if cliente_sel["servico_interesse"] in OPCOES_SERVICOS else \
-        OPCOES_SERVICOS[0]
-        dt_prox_atual = converter_str_data(cliente_sel["proximo_contato"]) or (date.today() + timedelta(days=3))
-        tem_data_salva = bool(str(cliente_sel["proximo_contato"] or "").strip())
-
-        with f1:
-            nova_etapa = st.selectbox("Etapa do Funil", ETAPAS_FUNIL, index=ETAPAS_FUNIL.index(etapa_atual))
-        with f2:
-            novo_valor = st.number_input("Valor Proposta (R$)", min_value=0.0, step=100.0,
-                                         value=float(cliente_sel["valor_estimado"] or 0.0))
-        with f3:
-            novo_servico = st.selectbox("Serviço / Interesse Principal", OPCOES_SERVICOS,
-                                        index=OPCOES_SERVICOS.index(serv_atual))
-        with f4:
-            nova_data_prox = st.date_input("Próximo Contato", value=dt_prox_atual)
-            manter_followup = st.checkbox("Agendar Follow-up", value=tem_data_salva)
 
         st.markdown("##### 📍 Endereço")
-        e1, e2, e3, e4 = st.columns([1.2, 3, 1, 1.5])
         with e1:
-            novo_cep = st.text_input("CEP", value=cliente_sel["cep"] or "")
         with e2:
             novo_log = st.text_input("Logradouro", value=cliente_sel["logradouro"] or "")
         with e3:
@@ -86,14 +78,10 @@ def modal_editar_cliente(cliente_id):
         with e7:
             nova_uf = st.text_input("UF", value=cliente_sel["uf"] or "", max_chars=2)
 
-        col_alt, col_exc = st.columns(2)
         with col_alt:
-            btn_alterar = st.form_submit_button("💾 Salvar Alterações", use_container_width=True, type="primary")
         with col_exc:
-            btn_excluir = st.form_submit_button("🗑️ Excluir Cadastro", use_container_width=True)
 
         if btn_alterar:
-            if not nova_razao.strip() or not novo_resp.strip():
                 st.error("Os campos 'Razão Social' e 'Responsável (PF)' são obrigatórios.")
             else:
                 str_prox_contato = nova_data_prox.strftime("%d/%m/%Y") if manter_followup else ""
@@ -102,30 +90,22 @@ def modal_editar_cliente(cliente_id):
                     UPDATE clientes 
                     SET razao_social=?, nome_fantasia=?, responsavel_pf=?, 
                         telefone=?, email=?, cep=?, logradouro=?, numero=?, complemento=?, 
-                        bairro=?, cidade=?, uf=?, etapa_funil=?, valor_estimado=?, 
-                        servico_interesse=?, proximo_contato=?
                     WHERE id=?
                 """, (
                     nova_razao.strip(), novo_fantasia.strip(), novo_resp.strip(),
-                    novo_tel.strip(), novo_email.strip(), limpar_numeros(novo_cep), novo_log.strip(),
                     novo_num.strip(), novo_comp.strip(), novo_bairro.strip(), nova_cidade.strip(),
-                    nova_uf.strip().upper(), nova_etapa, float(novo_valor), novo_servico,
-                    str_prox_contato, int(cliente_sel["id"])
                 ))
                 conn.commit()
                 conn.close()
-                st.session_state.msg_sucesso_cadastro = f"✅ Cadastro da empresa '{nova_razao.strip()}' atualizado com sucesso!"
                 st.rerun()
 
         if btn_excluir:
-            if int(cliente_sel["total_atividades"]) > 0:
-                st.error(
-                    f"Bloqueado: Este cliente possui {cliente_sel['total_atividades']} atividade(s) registrada(s) e não pode ser excluído!")
             else:
                 conn = conectar_db()
                 conn.execute("DELETE FROM clientes WHERE id=?", (int(cliente_sel["id"]),))
                 conn.commit()
                 conn.close()
+                _resetar_selecao_tabela_clientes()
                 st.session_state.msg_sucesso_cadastro = "🗑️ Cliente excluído com sucesso!"
                 st.rerun()
 
@@ -134,7 +114,14 @@ def renderizar_edicao_atividade(df_atividades, sufixo_key):
     if df_atividades.empty:
         return
 
+    perms = _perms_usuario_atual()
+    pode_editar = perms.get("pode_editar", False)
+
     with st.expander("✏️ Editar Registro de Atividade Existente", expanded=False):
+        if not pode_editar:
+            st.warning("Seu perfil não tem permissão para alterar registros já emitidos.")
+            return
+
         opcoes_ativ = {}
         for _, row in df_atividades.iterrows():
             empresa_lbl = f" - {row['Empresa']}" if "Empresa" in row else ""
@@ -186,8 +173,6 @@ def renderizar_edicao_atividade(df_atividades, sufixo_key):
                 novo_tempo_fmt = "Inválido"
                 st.metric("⏱️ Novo Tempo", "Inválido")
 
-        lista_modalidades = ["WhatsApp", "Telefone", "Presencial / Visita Técnica", "E-mail", "Reunião Online",
-                             "Outros"]
         mod_atual = ativ_row["Modalidade"] if ativ_row["Modalidade"] in lista_modalidades else "Outros"
         with c5:
             nova_mod = st.selectbox(
@@ -205,8 +190,6 @@ def renderizar_edicao_atividade(df_atividades, sufixo_key):
             key=f"ed_desc_{sufixo_key}_{ativ_id}"
         )
 
-        if st.button("💾 Salvar Alterações da Atividade", key=f"btn_salvar_ativ_{sufixo_key}_{ativ_id}", type="primary",
-                     use_container_width=True):
             if segundos <= 0:
                 st.error("O Horário Final ('Até') deve ser maior que o Horário Inicial ('De').")
             elif not nova_desc.strip():

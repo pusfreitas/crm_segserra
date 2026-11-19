@@ -6,7 +6,6 @@ import streamlit as st
 
 
 def limpar_numeros(texto):
-    return re.sub(r'\D', '', str(texto))
 
 
 def formatar_moeda(valor):
@@ -33,19 +32,102 @@ def validar_cnpj_algoritmo(cnpj):
     return cnpj[-2:] == f"{digito1}{digito2}"
 
 
+def consultar_cep_api(cep):
+    """Consulta endereço pelo CEP (8 dígitos). Retorna (dict_endereco, erro_str)."""
+    cep_limpo = limpar_numeros(cep)
+    if len(cep_limpo) != 8:
+        return None, "Informe um CEP válido com 8 dígitos."
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 SegSerra-CRM/1.0",
+        "Accept": "application/json"
+    }
+
+    # 1. ViaCEP
+    try:
+        resp = requests.get(f"https://viacep.com.br/ws/{cep_limpo}/json/", headers=headers, timeout=6)
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, dict) and not data.get("erro"):
+                return {
+                    "cep": formatar_cep(cep_limpo),
+                    "logradouro": (data.get("logradouro") or "").strip(),
+                    "complemento": (data.get("complemento") or "").strip(),
+                    "bairro": (data.get("bairro") or "").strip(),
+                    "cidade": (data.get("localidade") or "").strip(),
+                    "uf": (data.get("uf") or "").strip().upper(),
+                }, None
+    except Exception:
+        pass
+
+    # 2. BrasilAPI CEP (fallback)
+    try:
+        resp_b = requests.get(f"https://brasilapi.com.br/api/cep/v1/{cep_limpo}", headers=headers, timeout=6)
+        if resp_b.status_code == 200:
+            d = resp_b.json()
+            if isinstance(d, dict) and d.get("cep"):
+                return {
+                    "cep": formatar_cep(cep_limpo),
+                    "logradouro": (d.get("street") or "").strip(),
+                    "complemento": "",
+                    "bairro": (d.get("neighborhood") or "").strip(),
+                    "cidade": (d.get("city") or "").strip(),
+                    "uf": (d.get("state") or "").strip().upper(),
+                }, None
+    except Exception:
+        pass
+
+    return None, "CEP não localizado automaticamente. Preencha o endereço manualmente."
+
+
 def consultar_cnpj_api(cnpj):
     cnpj_limpo = limpar_numeros(cnpj)
-    url = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj_limpo}"
     try:
-        response = requests.get(url, timeout=10)
         if response.status_code == 200:
             return response.json(), None
         elif response.status_code == 404:
             return None, "CNPJ não encontrado na base da Receita Federal."
-        else:
             return None, f"Erro na consulta (Status {response.status_code})."
+    except Exception:
+        pass
+
+    url_minha_receita = f"https://minhareceita.org/{cnpj_limpo}"
+    try:
+        resp_alt = requests.get(url_minha_receita, headers=headers_padrao, timeout=10)
+        if resp_alt.status_code == 200:
+            d = resp_alt.json()
+            cnae_sec_formatados = []
+            for item in (d.get("cnaes_secundarios") or []):
+                if isinstance(item, dict):
+                    cnae_sec_formatados.append({
+                        "codigo": item.get("codigo"),
+                        "descricao": item.get("descricao")
+                    })
+
+            return {
+                "razao_social": d.get("razao_social", ""),
+                "nome_fantasia": d.get("nome_fantasia", ""),
+                "ddd_telefone_1": d.get("ddd_telefone_1", ""),
+                "email": d.get("email", ""),
+                "cep": d.get("cep", ""),
+                "descricao_tipo_de_logradouro": "",
+                "logradouro": d.get("logradouro", ""),
+                "numero": d.get("numero", ""),
+                "complemento": d.get("complemento", ""),
+                "bairro": d.get("bairro", ""),
+                "municipio": d.get("municipio", ""),
+                "uf": d.get("uf", ""),
+                "cnae_fiscal": d.get("cnae_fiscal"),
+                "cnae_fiscal_descricao": d.get("cnae_fiscal_descricao", ""),
+                "cnaes_secundarios": cnae_sec_formatados
+            }, None
+        elif resp_alt.status_code == 429:
+            return None, "Limite de consultas atingido (Status 429). Aguarde cerca de 1 minuto e tente novamente."
+        elif resp_alt.status_code == 404:
+            return None, "CNPJ não encontrado na base da Receita Federal."
+        else:
+            return None, f"Erro na consulta (Status {resp_alt.status_code})."
     except Exception as e:
-        return None, f"Erro de conexão: {e}"
 
 
 def somar_tempos_formatados(serie_tempos):
@@ -87,47 +169,31 @@ def avaliar_status_followup(data_str):
         return "FUTURO", f"🟢 Próx. Contato: {data_str} (em {dias}d)"
 
 
-def aplicar_identidade_visual():
     """Injeta o CSS oficial da SegSerra (Bree Serif + Paleta #2dd2cd) em todo o sistema."""
-    st.markdown("""
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Bree+Serif&family=Inter:wght@400;500;600;700&display=swap');
 
-        /* Tipografia oficial nos títulos */
-        h1, h2, h3 {
             font-family: 'Bree Serif', serif !important;
             color: #0f5257 !important;
             letter-spacing: 0.3px;
-        }
 
-        /* Ajuste de espaçamento superior */
-        .block-container {
             padding-top: 1.5rem !important;
             padding-bottom: 2rem !important;
-        }
 
-        /* Estilo dos Cartões (Containers com borda no Kanban e Formulários) */
-        div[data-testid="stVerticalBlockBorderWrapper"] {
             background-color: #ffffff;
             border: 1px solid #e2e8f0 !important;
             border-left: 4px solid #2dd2cd !important;
             border-radius: 10px !important;
             box-shadow: 0 4px 12px rgba(15, 82, 87, 0.05);
             padding: 0.2rem;
-        }
 
-        /* Destaque para os Cards de Indicadores (st.metric) */
-        div[data-testid="stMetric"] {
             background-color: #ffffff;
             border: 1px solid #e2e8f0;
             border-top: 3px solid #2dd2cd;
             border-radius: 10px;
             padding: 12px 16px;
             box-shadow: 0 2px 6px rgba(0, 0, 0, 0.03);
-        }
 
-        /* Botões Primários na cor da marca (#2dd2cd com contraste escuro) */
-        button[kind="primary"] {
             background: linear-gradient(135deg, #2dd2cd 0%, #17b8b3 100%) !important;
             color: #06373a !important;
             font-weight: 700 !important;
@@ -135,35 +201,21 @@ def aplicar_identidade_visual():
             border-radius: 8px !important;
             box-shadow: 0 2px 6px rgba(45, 210, 205, 0.35);
             transition: all 0.2s ease-in-out;
-        }
-        button[kind="primary"]:hover {
             background: linear-gradient(135deg, #22bfb9 0%, #0f9692 100%) !important;
             color: #ffffff !important;
             transform: translateY(-1px);
-        }
 
-        /* Personalização da Barra Lateral (Sidebar) */
-        section[data-testid="stSidebar"] {
             background-color: #0d2b30 !important;
             border-right: 3px solid #2dd2cd;
-        }
-        section[data-testid="stSidebar"] * {
             color: #f1f5f9 !important;
-        }
-        section[data-testid="stSidebar"] hr {
             border-color: rgba(45, 210, 205, 0.25) !important;
-        }
-        section[data-testid="stSidebar"] button {
             background-color: rgba(255, 255, 255, 0.08) !important;
             border: 1px solid rgba(45, 210, 205, 0.4) !important;
             color: #ffffff !important;
             border-radius: 8px !important;
-        }
-        section[data-testid="stSidebar"] button:hover {
             background-color: #2dd2cd !important;
             color: #06373a !important;
             font-weight: 700 !important;
-        }
         </style>
     """, unsafe_allow_html=True)
 

@@ -1,42 +1,120 @@
+import sqlite3
+import pandas as pd
 import streamlit as st
 import pandas as pd
 from datetime import datetime, time, timedelta, date
-from database import conectar_db, ETAPAS_FUNIL
-from utils import converter_str_data
 from componentes import renderizar_edicao_atividade
 
 
+def _renderizar_bloco_novo_cliente_atividade():
+    with st.expander("➕ Incluir Novo Cliente", expanded=False):
+        st.caption("Cadastre um novo cliente rapidamente para já lançar a atividade em seguida.")
+
+        cep_rapido = st.text_input("CEP (opcional — preenche endereço ao informar 8 dígitos)", placeholder="00000-000", key="ativ_nc_cep")
+        cep_fmt = formatar_cep(cep_rapido)
+        cep_limpo = limpar_numeros(cep_fmt)
+
+        log_ini, bairro_ini, cid_ini, uf_ini = "", "", "", "RS"
+        if len(cep_limpo) == 8:
+            dados_cep, erro_cep = consultar_cep_api(cep_limpo)
+            if dados_cep:
+                log_ini = dados_cep.get("logradouro") or ""
+                bairro_ini = dados_cep.get("bairro") or ""
+                cid_ini = dados_cep.get("cidade") or ""
+                uf_ini = dados_cep.get("uf") or "RS"
+            elif erro_cep:
+                st.caption(f"ℹ️ {erro_cep}")
+
+        with st.form("form_novo_cliente_em_atividade", clear_on_submit=True):
+            c1, c2, c3 = st.columns([1.4, 2.2, 1.3])
+            with c1:
+                nc_cnpj = st.text_input("CNPJ *", placeholder="00.000.000/0001-00")
+            with c2:
+                nc_razao = st.text_input("Razão Social *")
+            with c3:
+                nc_cat = st.selectbox("Categoria *", CATEGORIAS_CLIENTE, index=0)
+
+            r1, r2, r3 = st.columns([1.8, 1.4, 1.6])
+            with r1:
+                nc_resp = st.text_input("Responsável *")
+            with r2:
+                nc_tel = st.text_input("Telefone / WhatsApp")
+            with r3:
+                nc_email = st.text_input("E-mail")
+
+            e1, e2, e3, e4 = st.columns([2.5, 1.0, 1.8, 0.9])
+            with e1:
+                nc_log = st.text_input("Logradouro", value=log_ini)
+            with e2:
+                nc_num = st.text_input("Número")
+            with e3:
+                nc_cid = st.text_input("Cidade", value=cid_ini)
+            with e4:
+                nc_uf = st.text_input("UF", value=uf_ini, max_chars=2)
+
+            nc_bairro = st.text_input("Bairro", value=bairro_ini)
+
+            if st.form_submit_button("💾 Cadastrar e Selecionar Cliente", type="primary", use_container_width=True):
+                cnpj_limpo = limpar_numeros(nc_cnpj)
+                if not validar_cnpj_algoritmo(cnpj_limpo):
+                    st.error("CNPJ inválido. Verifique os 14 dígitos.")
+                elif not nc_razao.strip() or not nc_resp.strip():
+                    st.error("Preencha 'Razão Social' e 'Responsável'.")
+                else:
+                    try:
+                        conn = conectar_db()
+                        cur = conn.cursor()
+                        cur.execute("""
+                            INSERT INTO clientes (
+                                cnpj, razao_social, nome_fantasia, responsavel_pf,
+                                telefone, email, cep, logradouro, numero, bairro, cidade, uf, categoria
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            cnpj_limpo,
+                            nc_razao.strip(),
+                            nc_razao.strip(),
+                            nc_resp.strip(),
+                            nc_tel.strip(),
+                            nc_email.strip(),
+                            cep_fmt,
+                            nc_log.strip(),
+                            nc_num.strip(),
+                            nc_bairro.strip(),
+                            nc_cid.strip(),
+                            nc_uf.strip().upper(),
+                            nc_cat,
+                        ))
+                        novo_id = int(cur.lastrowid)
+                        conn.commit()
+                        conn.close()
+                        st.session_state.cliente_pre_selecionado_id = novo_id
+                        st.session_state.msg_sucesso_atividade = f"✅ Cliente '{nc_razao.strip()}' cadastrado e selecionado!"
+                        st.rerun()
+                    except sqlite3.IntegrityError:
+                        st.error("Já existe um cliente cadastrado com este CNPJ.")
+
+
 def renderizar_tela_atividades():
-    st.title("📋 Lançamento e Consulta de Atividades")
 
     if "msg_sucesso_atividade" in st.session_state:
         st.success(st.session_state.msg_sucesso_atividade)
         st.toast(st.session_state.msg_sucesso_atividade)
         del st.session_state.msg_sucesso_atividade
 
+    _renderizar_bloco_novo_cliente_atividade()
+
     conn = conectar_db()
     df_clientes = pd.read_sql_query("""
-        SELECT id, cnpj, razao_social, responsavel_pf, cidade, etapa_funil, proximo_contato 
-        FROM clientes 
-        ORDER BY razao_social
+        FROM clientes
     """, conn)
     conn.close()
 
     if df_clientes.empty:
-        st.warning("Cadastre pelo menos um cliente antes de lançar atividades.")
         return
 
-    opcoes_clientes = {
-        f"{row['razao_social']} | Resp: {row['responsavel_pf']} ({row['etapa_funil']})": row
-        for _, row in df_clientes.iterrows()
     }
-    lista_labels = list(opcoes_clientes.keys())
 
     idx_padrao = 0
-    if st.session_state.get("cliente_pre_selecionado_id") is not None:
-        for idx, (_, row_c) in enumerate(opcoes_clientes.items()):
-            if int(row_c['id']) == st.session_state.cliente_pre_selecionado_id:
-                idx_padrao = idx
                 break
         st.session_state.cliente_pre_selecionado_id = None
 
@@ -50,70 +128,23 @@ def renderizar_tela_atividades():
 
     st.subheader("Registrar Novo Atendimento")
     with st.container(border=True):
-        st.caption(f"👤 **Atendente responsável pelo lançamento:** `{atendente_atual}`")
-        col_cli, col_funil_at, col_prox_at = st.columns([2.2, 1.5, 1.2])
-        with col_cli:
-            cliente_escolhido_lbl = st.selectbox("Selecione o Cliente *", lista_labels, index=idx_padrao)
-        cliente_row_at = opcoes_clientes[cliente_escolhido_lbl]
-        etapa_cli_atual = cliente_row_at["etapa_funil"] if cliente_row_at["etapa_funil"] in ETAPAS_FUNIL else \
-        ETAPAS_FUNIL[0]
-        dt_prox_cli = converter_str_data(cliente_row_at["proximo_contato"]) or (date.today() + timedelta(days=7))
 
-        with col_funil_at:
-            nova_etapa_atend = st.selectbox(
-                "Atualizar Etapa no Funil:",
-                ETAPAS_FUNIL,
-                index=ETAPAS_FUNIL.index(etapa_cli_atual)
-            )
-        with col_prox_at:
-            novo_followup_atend = st.date_input("Agendar Próximo Contato:", value=dt_prox_cli)
-            agendar_fw_check = st.checkbox("Atualizar data de retorno", value=True)
 
-        c1, c2, c3, c4, c5 = st.columns([1.3, 1.1, 1.1, 1.3, 1.8])
         with c1:
-            data_atend = st.date_input("Data do Atendimento *", value=datetime.today())
         with c2:
-            hora_inicio = st.time_input("Horário Inicial (De) *", value=time(10, 0), step=timedelta(minutes=15))
         with c3:
-            hora_fim = st.time_input("Horário Final (Até) *", value=time(12, 0), step=timedelta(minutes=15))
 
-        dt_inicio = datetime.combine(data_atend, hora_inicio)
-        dt_fim = datetime.combine(data_atend, hora_fim)
-        segundos_totais = int((dt_fim - dt_inicio).total_seconds())
 
         with c4:
-            if segundos_totais > 0:
-                horas = segundos_totais // 3600
-                minutos = (segundos_totais % 3600) // 60
-                tempo_formatado = f"{horas:02d}h {minutos:02d}m"
-                st.metric("⏱️ Tempo Gasto", tempo_formatado)
             else:
-                tempo_formatado = "Inválido"
-                st.metric("⏱️ Tempo Gasto", "Inválido")
 
         with c5:
-            modalidade = st.selectbox("Modalidade de Atendimento *", [
-                "WhatsApp", "Telefone", "Presencial / Visita Técnica", "E-mail", "Reunião Online", "Outros"
-            ])
 
-        if segundos_totais <= 0:
-            st.warning("⚠️ O Horário Final ('Até') deve ser maior que o Horário Inicial ('De').")
 
-        descricao = st.text_area("O que foi feito? (Detalhamento da atividade) *", key="ativ_descricao", height=110)
 
-        registrar = st.button("✅ Lançar Atividade", use_container_width=True, type="primary")
 
-        if registrar:
-            if segundos_totais <= 0:
-                st.error(
-                    "Corrija o intervalo de horário antes de salvar (o horário final deve ser posterior ao inicial).")
             elif not descricao.strip():
-                st.error("Por favor, descreva o que foi realizado no atendimento.")
             else:
-                str_inicio = hora_inicio.strftime("%H:%M")
-                str_fim = hora_fim.strftime("%H:%M")
-                periodo_str = f"{str_inicio} às {str_fim}"
-                cid_at = int(cliente_row_at["id"])
 
                 conn = conectar_db()
                 conn.execute("""
@@ -122,45 +153,19 @@ def renderizar_tela_atividades():
                         tempo_total, modalidade, descricao, atendente
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    cid_at,
-                    data_atend.strftime("%d/%m/%Y"),
                     periodo_str,
-                    str_inicio,
                     str_fim,
-                    tempo_formatado,
                     modalidade,
                     descricao.strip(),
-                    atendente_atual
                 ))
-
-                if agendar_fw_check:
-                    str_fw = novo_followup_atend.strftime("%d/%m/%Y")
-                    conn.execute("UPDATE clientes SET etapa_funil = ?, proximo_contato = ? WHERE id = ?",
-                                 (nova_etapa_atend, str_fw, cid_at))
-                else:
-                    conn.execute("UPDATE clientes SET etapa_funil = ? WHERE id = ?", (nova_etapa_atend, cid_at))
-
                 conn.commit()
                 conn.close()
 
-                st.session_state.msg_sucesso_atividade = f"✅ Atividade registrada por '{atendente_atual}'! (Duração: {tempo_formatado} | Etapa: {nova_etapa_atend})"
-                st.session_state.limpar_desc_ativ = True
                 st.rerun()
 
     st.divider()
-    st.subheader("Histórico Geral de Atividades Realizadas")
     conn = conectar_db()
     df_hist = pd.read_sql_query("""
-        SELECT a.id as ID, a.data as Data, 
-               CASE WHEN a.hora_inicio != '' THEN a.hora_inicio ELSE a.horario END as 'Início',
-               a.hora_fim as 'Término',
-               a.tempo_total as 'Tempo Gasto',
-               a.atendente as 'Atendente',
-               c.razao_social as Empresa, 
-               c.etapa_funil as 'Etapa Atual',
-               c.proximo_contato as 'Próx. Contato',
-               c.cidade as Cidade, c.responsavel_pf as Responsável, 
-               a.modalidade as Modalidade, a.descricao as Detalhamento
         FROM atividades a
         JOIN clientes c ON a.cliente_id = c.id
         ORDER BY a.id DESC
@@ -168,12 +173,4 @@ def renderizar_tela_atividades():
     conn.close()
 
     if df_hist.empty:
-        st.info("Nenhuma atividade registrada ainda.")
     else:
-        atendentes_disp = ["Todos os Atendentes"] + sorted(
-            [a for a in df_hist["Atendente"].dropna().unique() if str(a).strip() != ""])
-        filtro_atend = st.selectbox("Filtrar histórico por Atendente:", atendentes_disp)
-
-        df_mostrar = df_hist if filtro_atend == "Todos os Atendentes" else df_hist[df_hist["Atendente"] == filtro_atend]
-        st.dataframe(df_mostrar, use_container_width=True, hide_index=True)
-        renderizar_edicao_atividade(df_mostrar, sufixo_key="aba_geral")
