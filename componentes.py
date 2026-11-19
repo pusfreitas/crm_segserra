@@ -1,10 +1,27 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, time, timedelta, date
+from database import (
+    conectar_db,
+    CATEGORIAS_CLIENTE,
+    STATUS_CLIENTE,
+    obter_permissoes_perfil
+)
+from utils import formatar_cep, converter_str_data, converter_str_hora
+
+
+def _perms_usuario_atual():
+    perfil = st.session_state.get("perfil_usuario", "Comercial / Atendimento")
+    return obter_permissoes_perfil(perfil)
+
+
+def _resetar_selecao_tabela_clientes():
+    st.session_state.tabela_clientes_nonce = int(st.session_state.get("tabela_clientes_nonce", 0)) + 1
 
 
 def ir_para_lancamento_cliente(cliente_id):
     st.session_state.cliente_pre_selecionado_id = int(cliente_id)
+    st.session_state.navegar_para_pendente = "Lançar Atividades"
 
 
 def alterar_etapa_funil_rapido(cliente_id, nova_etapa):
@@ -19,6 +36,7 @@ def alterar_etapa_funil_rapido(cliente_id, nova_etapa):
     st.toast(f"Etapa atualizada para: {nova_etapa}")
 
 
+@st.dialog("✏️ Alterar / Excluir Cadastro da Empresa", width="large", on_dismiss=_resetar_selecao_tabela_clientes)
 def modal_editar_cliente(cliente_id):
     perms = _perms_usuario_atual()
     pode_editar = perms.get("pode_editar", False)
@@ -39,8 +57,15 @@ def modal_editar_cliente(cliente_id):
         return
 
     cliente_sel = df_c.iloc[0]
+    st.markdown(f"**CNPJ:** `{cliente_sel['cnpj']}`")
+
+    if not pode_editar:
+        st.warning("Seu perfil possui permissão apenas de leitura para este cadastro.")
+    if not pode_excluir:
+        st.caption("Exclusão de registros restrita a perfis com permissão de exclusão.")
 
     with st.form(f"form_modal_cliente_{cliente_id}"):
+        c1, c2, c3, c4 = st.columns([2.0, 1.4, 1.1, 1.0])
         with c1:
             nova_razao = st.text_input("Razão Social *", value=cliente_sel["razao_social"] or "")
         with c2:
@@ -56,13 +81,19 @@ def modal_editar_cliente(cliente_id):
         r1, r2, r3 = st.columns([1.8, 1.4, 1.5])
         with r1:
             novo_resp = st.text_input("Responsável (PF) *", value=cliente_sel["responsavel_pf"] or "")
+        with r2:
             novo_tel = st.text_input("Telefone / WhatsApp", value=cliente_sel["telefone"] or "")
         with r3:
             novo_email = st.text_input("E-mail", value=cliente_sel["email"] or "")
 
+        st.markdown("##### 🏭 CNAEs Vinculados à Empresa")
+        novo_cnae_prin = st.text_input("CNAE Principal", value=cliente_sel["cnae_principal"] or "")
+        novos_cnaes_sec = st.text_area("CNAEs Secundários", value=cliente_sel["cnaes_secundarios"] or "", height=85)
 
         st.markdown("##### 📍 Endereço")
+        e1, e2, e3, e4 = st.columns([1.3, 3, 1, 1.5])
         with e1:
+            novo_cep = st.text_input("CEP", value=formatar_cep(cliente_sel["cep"] or ""))
         with e2:
             novo_log = st.text_input("Logradouro", value=cliente_sel["logradouro"] or "")
         with e3:
@@ -78,28 +109,63 @@ def modal_editar_cliente(cliente_id):
         with e7:
             nova_uf = st.text_input("UF", value=cliente_sel["uf"] or "", max_chars=2)
 
+        col_alt, col_exc, col_fechar = st.columns([1.4, 1.2, 1.0])
         with col_alt:
+            btn_alterar = st.form_submit_button(
+                "💾 Salvar Alterações",
+                use_container_width=True,
+                type="primary",
+                disabled=not pode_editar
+            )
         with col_exc:
+            btn_excluir = st.form_submit_button(
+                "🗑️ Excluir Cadastro",
+                use_container_width=True,
+                disabled=not pode_excluir
+            )
+        with col_fechar:
+            btn_fechar = st.form_submit_button(
+                "Fechar",
+                use_container_width=True
+            )
+
+        if btn_fechar:
+            _resetar_selecao_tabela_clientes()
+            st.rerun()
 
         if btn_alterar:
+            if not pode_editar:
+                st.error("Seu perfil não tem permissão para alterar cadastros.")
+            elif not nova_razao.strip() or not novo_resp.strip():
                 st.error("Os campos 'Razão Social' e 'Responsável (PF)' são obrigatórios.")
             else:
-                str_prox_contato = nova_data_prox.strftime("%d/%m/%Y") if manter_followup else ""
                 conn = conectar_db()
                 conn.execute("""
                     UPDATE clientes 
                     SET razao_social=?, nome_fantasia=?, responsavel_pf=?, 
                         telefone=?, email=?, cep=?, logradouro=?, numero=?, complemento=?, 
+                        bairro=?, cidade=?, uf=?, categoria=?, status_cliente=?,
+                        cnae_principal=?, cnaes_secundarios=?
                     WHERE id=?
                 """, (
                     nova_razao.strip(), novo_fantasia.strip(), novo_resp.strip(),
+                    novo_tel.strip(), novo_email.strip(), formatar_cep(novo_cep), novo_log.strip(),
                     novo_num.strip(), novo_comp.strip(), novo_bairro.strip(), nova_cidade.strip(),
+                    nova_uf.strip().upper(), nova_categoria, novo_status,
+                    novo_cnae_prin.strip(), novos_cnaes_sec.strip(),
+                    int(cliente_sel["id"])
                 ))
                 conn.commit()
                 conn.close()
+                _resetar_selecao_tabela_clientes()
+                st.session_state.msg_sucesso_cadastro = f"✅ Cadastro '{nova_razao.strip()}' foi alterado com sucesso!"
                 st.rerun()
 
         if btn_excluir:
+            if not pode_excluir:
+                st.error("Seu perfil não tem permissão para excluir registros.")
+            elif int(cliente_sel["total_atividades"]) > 0:
+                st.error(f"Bloqueado: Este cliente possui {cliente_sel['total_atividades']} atividade(s) vinculada(s) e não pode ser excluído!")
             else:
                 conn = conectar_db()
                 conn.execute("DELETE FROM clientes WHERE id=?", (int(cliente_sel["id"]),))
@@ -173,6 +239,7 @@ def renderizar_edicao_atividade(df_atividades, sufixo_key):
                 novo_tempo_fmt = "Inválido"
                 st.metric("⏱️ Novo Tempo", "Inválido")
 
+        lista_modalidades = ["WhatsApp", "Telefone", "Presencial / Visita Técnica", "E-mail", "Reunião Online", "Outros"]
         mod_atual = ativ_row["Modalidade"] if ativ_row["Modalidade"] in lista_modalidades else "Outros"
         with c5:
             nova_mod = st.selectbox(
@@ -190,6 +257,7 @@ def renderizar_edicao_atividade(df_atividades, sufixo_key):
             key=f"ed_desc_{sufixo_key}_{ativ_id}"
         )
 
+        if st.button("💾 Salvar Alterações da Atividade", key=f"btn_salvar_ativ_{sufixo_key}_{ativ_id}", type="primary", use_container_width=True):
             if segundos <= 0:
                 st.error("O Horário Final ('Até') deve ser maior que o Horário Inicial ('De').")
             elif not nova_desc.strip():

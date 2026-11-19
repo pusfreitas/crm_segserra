@@ -6,6 +6,16 @@ import streamlit as st
 
 
 def limpar_numeros(texto):
+    """Retorna apenas os dígitos numéricos de uma string."""
+    return "".join(ch for ch in str(texto or "") if ch.isdigit())
+
+
+def formatar_cep(cep):
+    """Formata CEP com 8 dígitos para 00000-000."""
+    nums = limpar_numeros(cep)
+    if len(nums) == 8:
+        return f"{nums[:5]}-{nums[5:]}"
+    return str(cep or "").strip()
 
 
 def formatar_moeda(valor):
@@ -30,6 +40,44 @@ def validar_cnpj_algoritmo(cnpj):
     digito2 = 0 if (soma2 % 11) < 2 else 11 - (soma2 % 11)
 
     return cnpj[-2:] == f"{digito1}{digito2}"
+
+
+def _formatar_codigo_cnae(codigo):
+    digitos = limpar_numeros(codigo)
+    if len(digitos) == 7:
+        return f"{digitos[:4]}-{digitos[4]}/{digitos[5:]}"
+    return str(codigo or "").strip()
+
+
+def formatar_cnaes_api(dados_api):
+    """Formata CNAE principal e CNAEs secundários a partir do retorno da API."""
+    if not isinstance(dados_api, dict):
+        return "", ""
+
+    cnae_cod_fmt = _formatar_codigo_cnae(dados_api.get("cnae_fiscal"))
+    cnae_desc = (dados_api.get("cnae_fiscal_descricao") or "").strip()
+    if cnae_cod_fmt and cnae_desc:
+        cnae_prin = f"{cnae_cod_fmt} - {cnae_desc}"
+    elif cnae_cod_fmt:
+        cnae_prin = cnae_cod_fmt
+    else:
+        cnae_prin = cnae_desc
+
+    secundarios_lista = []
+    for item in (dados_api.get("cnaes_secundarios") or []):
+        if isinstance(item, dict):
+            cod_fmt = _formatar_codigo_cnae(item.get("codigo"))
+            desc = (item.get("descricao") or "").strip()
+            if cod_fmt and desc:
+                secundarios_lista.append(f"{cod_fmt} - {desc}")
+            elif desc:
+                secundarios_lista.append(desc)
+            elif cod_fmt:
+                secundarios_lista.append(cod_fmt)
+        elif item:
+            secundarios_lista.append(str(item).strip())
+
+    return cnae_prin, "\n".join(secundarios_lista)
 
 
 def consultar_cep_api(cep):
@@ -81,16 +129,31 @@ def consultar_cep_api(cep):
 
 
 def consultar_cnpj_api(cnpj):
+    """Consulta dados de CNPJ via BrasilAPI com fallback para MinhaReceita."""
     cnpj_limpo = limpar_numeros(cnpj)
+    if not validar_cnpj_algoritmo(cnpj_limpo):
+        return None, "CNPJ inválido."
+
+    headers_padrao = {
+        "User-Agent": "Mozilla/5.0 SegSerra-CRM/1.0",
+        "Accept": "application/json"
+    }
+
+    # 1. BrasilAPI
     try:
+        response = requests.get(
+            f"https://brasilapi.com.br/api/cnpj/v1/{cnpj_limpo}",
+            headers=headers_padrao,
+            timeout=10
+        )
         if response.status_code == 200:
             return response.json(), None
         elif response.status_code == 404:
             return None, "CNPJ não encontrado na base da Receita Federal."
-            return None, f"Erro na consulta (Status {response.status_code})."
     except Exception:
         pass
 
+    # 2. MinhaReceita (fallback)
     url_minha_receita = f"https://minhareceita.org/{cnpj_limpo}"
     try:
         resp_alt = requests.get(url_minha_receita, headers=headers_padrao, timeout=10)
@@ -119,7 +182,8 @@ def consultar_cnpj_api(cnpj):
                 "uf": d.get("uf", ""),
                 "cnae_fiscal": d.get("cnae_fiscal"),
                 "cnae_fiscal_descricao": d.get("cnae_fiscal_descricao", ""),
-                "cnaes_secundarios": cnae_sec_formatados
+                "cnaes_secundarios": cnae_sec_formatados,
+                "qsa": d.get("qsa", []),
             }, None
         elif resp_alt.status_code == 429:
             return None, "Limite de consultas atingido (Status 429). Aguarde cerca de 1 minuto e tente novamente."
@@ -128,6 +192,7 @@ def consultar_cnpj_api(cnpj):
         else:
             return None, f"Erro na consulta (Status {resp_alt.status_code})."
     except Exception as e:
+        return None, f"Falha ao consultar o CNPJ: {e}"
 
 
 def somar_tempos_formatados(serie_tempos):
@@ -169,31 +234,68 @@ def avaliar_status_followup(data_str):
         return "FUTURO", f"🟢 Próx. Contato: {data_str} (em {dias}d)"
 
 
+def aplicar_identidade_visual(menu_fixo=True):
     """Injeta o CSS oficial da SegSerra (Bree Serif + Paleta #2dd2cd) em todo o sistema."""
+    css_sidebar_fixo = ""
+    if menu_fixo:
+        css_sidebar_fixo = """
+            section[data-testid="stSidebar"] {
+                position: fixed !important;
+                top: 0 !important;
+                left: 0 !important;
+                height: 100vh !important;
+                min-width: 260px !important;
+                max-width: 260px !important;
+                transform: none !important;
+                z-index: 999 !important;
+            }
+            section[data-testid="stSidebar"] > div:first-child {
+                height: 100vh !important;
+                overflow-y: auto !important;
+            }
+            button[data-testid="stSidebarCollapseButton"],
+            button[data-testid="collapsedControl"] {
+                display: none !important;
+            }
+            .block-container {
+                margin-left: 260px !important;
+            }
+        """
+
+    st.markdown(f"""
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Bree+Serif&family=Inter:wght@400;500;600;700&display=swap');
 
+        h1, h2, h3 {{
             font-family: 'Bree Serif', serif !important;
             color: #0f5257 !important;
             letter-spacing: 0.3px;
+        }}
 
+        .block-container {{
             padding-top: 1.5rem !important;
             padding-bottom: 2rem !important;
+        }}
 
+        div[data-testid="stVerticalBlockBorderWrapper"] {{
             background-color: #ffffff;
             border: 1px solid #e2e8f0 !important;
             border-left: 4px solid #2dd2cd !important;
             border-radius: 10px !important;
             box-shadow: 0 4px 12px rgba(15, 82, 87, 0.05);
             padding: 0.2rem;
+        }}
 
+        div[data-testid="stMetric"] {{
             background-color: #ffffff;
             border: 1px solid #e2e8f0;
             border-top: 3px solid #2dd2cd;
             border-radius: 10px;
             padding: 12px 16px;
             box-shadow: 0 2px 6px rgba(0, 0, 0, 0.03);
+        }}
 
+        button[kind="primary"] {{
             background: linear-gradient(135deg, #2dd2cd 0%, #17b8b3 100%) !important;
             color: #06373a !important;
             font-weight: 700 !important;
@@ -201,21 +303,38 @@ def avaliar_status_followup(data_str):
             border-radius: 8px !important;
             box-shadow: 0 2px 6px rgba(45, 210, 205, 0.35);
             transition: all 0.2s ease-in-out;
+        }}
+
+        button[kind="primary"]:hover {{
             background: linear-gradient(135deg, #22bfb9 0%, #0f9692 100%) !important;
             color: #ffffff !important;
             transform: translateY(-1px);
+        }}
 
+        section[data-testid="stSidebar"] {{
             background-color: #0d2b30 !important;
             border-right: 3px solid #2dd2cd;
+        }}
+
+        section[data-testid="stSidebar"] * {{
             color: #f1f5f9 !important;
+        }}
+
+        section[data-testid="stSidebar"] .stRadio > div > label {{
             border-color: rgba(45, 210, 205, 0.25) !important;
             background-color: rgba(255, 255, 255, 0.08) !important;
             border: 1px solid rgba(45, 210, 205, 0.4) !important;
             color: #ffffff !important;
             border-radius: 8px !important;
+        }}
+
+        section[data-testid="stSidebar"] .stRadio > div > label[data-checked="true"] {{
             background-color: #2dd2cd !important;
             color: #06373a !important;
             font-weight: 700 !important;
+        }}
+
+        {css_sidebar_fixo}
         </style>
     """, unsafe_allow_html=True)
 

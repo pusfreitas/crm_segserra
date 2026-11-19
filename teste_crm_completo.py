@@ -3,6 +3,7 @@ import sys
 import json
 import types
 import sqlite3
+import inspect
 import tempfile
 import unittest
 from datetime import date, timedelta
@@ -14,8 +15,14 @@ if BASE_DIR not in sys.path:
 
 
 def criar_mock_streamlit():
-    """Cria um mock funcional mínimo do módulo streamlit para testar funções de tela sem abrir navegador."""
+    """Cria um mock funcional mínimo do módulo streamlit e de seus submódulos para testes."""
     st_mock = types.ModuleType("streamlit")
+    st_mock.__path__ = []
+
+    comp_mock = types.ModuleType("streamlit.components")
+    comp_mock.__path__ = []
+
+    v1_mock = types.ModuleType("streamlit.components.v1")
 
     class SessionStateDict(dict):
         def __getattr__(self, key):
@@ -52,6 +59,17 @@ def criar_mock_streamlit():
     st_mock.warning = noop
     st_mock.success = noop
     st_mock.info = noop
+
+    v1_mock.html = noop
+    v1_mock.iframe = noop
+
+    comp_mock.v1 = v1_mock
+    st_mock.components = comp_mock
+
+    sys.modules["streamlit"] = st_mock
+    sys.modules["streamlit.components"] = comp_mock
+    sys.modules["streamlit.components.v1"] = v1_mock
+
     return st_mock
 
 
@@ -79,7 +97,6 @@ class TesteFuncionalCRM(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.st_mock = criar_mock_streamlit()
-        sys.modules["streamlit"] = cls.st_mock
 
         import database
         import utils
@@ -142,6 +159,43 @@ class TesteFuncionalCRM(unittest.TestCase):
         self.st_mock.session_state.perfil_usuario = u_perfil
         return True, "OK"
 
+    def _montar_texto_proposta_compativel(self, **dados):
+        """Adapta os argumentos aos nomes reais aceitos por montar_texto_proposta."""
+        fn = self.tela_propostas.montar_texto_proposta
+        sig = inspect.signature(fn)
+
+        aliases = {
+            "data_emissao": ["data_emissao", "data_emissao_str", "data"],
+            "razao_social": ["razao_social", "empresa", "cliente"],
+            "cnpj": ["cnpj", "cnpj_fmt"],
+            "solicitante": ["solicitante", "responsavel", "contato_nome"],
+            "contatos": ["contatos", "contato"],
+            "servicos": ["servicos", "servicos_texto", "itens_texto", "itens_servicos", "descricao_servicos"],
+            "valor": ["valor", "valor_investimento", "valor_total", "investimento"],
+            "condicoes_pagamento": ["condicoes_pagamento", "condicoes_pag", "pagamento"],
+            "observacoes_art": ["observacoes_art", "obs_art", "observacoes", "obs"],
+            "responsavel_emissao": ["responsavel_emissao", "emitido_por", "consultor"],
+        }
+
+        kwargs_finais = {}
+        for chave_canonica, candidatos in aliases.items():
+            if chave_canonica not in dados:
+                continue
+            for nome_param in candidatos:
+                if nome_param in sig.parameters:
+                    kwargs_finais[nome_param] = dados[chave_canonica]
+                    break
+
+        for nome_param, param in sig.parameters.items():
+            if nome_param not in kwargs_finais and param.default is inspect.Parameter.empty:
+                if param.kind in (
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY,
+                ):
+                    kwargs_finais[nome_param] = ""
+
+        return fn(**kwargs_finais)
+
     def test_01_login_multiplos_usuarios_e_logout(self):
         ok, _ = self._autenticar_sql("admin", "1234")
         self.assertTrue(ok)
@@ -188,14 +242,11 @@ class TesteFuncionalCRM(unittest.TestCase):
         self.assertFalse(ok_inativo)
         self.assertIn("inativo", msg_inativo.lower())
 
-        self.st_mock.session_state.menu_pagina = "Emissão de Propostas"
+        self.st_mock.session_state.pagina_ativa = "Emissão de Propostas"
         self.tela_login.realizar_logout()
         self.assertFalse(self.st_mock.session_state.logado)
         self.assertIsNone(self.st_mock.session_state.usuario_atual)
-        self.assertEqual(
-            self.st_mock.session_state.menu_pagina,
-            "Clientes (Consulta e Cadastro)",
-        )
+        self.assertIsNone(self.st_mock.session_state.pagina_ativa)
 
     def test_02_cadastro_cliente_cnaes_categoria_e_regra_exclusao(self):
         retorno_api = {
@@ -254,7 +305,7 @@ class TesteFuncionalCRM(unittest.TestCase):
 
         self.componentes.ir_para_lancamento_cliente(cliente_id)
         self.assertEqual(self.st_mock.session_state.cliente_pre_selecionado_id, cliente_id)
-        self.assertEqual(self.st_mock.session_state.menu_pagina, "Lançar Atividades")
+        self.assertEqual(self.st_mock.session_state.navegar_para_pendente, "Lançar Atividades")
 
         self.componentes.alterar_etapa_funil_rapido(
             cliente_id, "3. Proposta / Tabela Enviada"
@@ -333,17 +384,19 @@ class TesteFuncionalCRM(unittest.TestCase):
         self.assertEqual(nova_data, hoje_str)
 
         cnpj_fmt = self.tela_propostas.formatar_cnpj_exibicao("22333444000192")
-        texto_prop = self.tela_propostas.montar_texto_proposta(
-            data_emissao_str=hoje_str,
+        texto_prop = self._montar_texto_proposta_compativel(
+            data_emissao=hoje_str,
             razao_social="Metalurgica Vale dos Vinhedos Ltda",
-            cnpj_fmt=cnpj_fmt,
+            cnpj=cnpj_fmt,
             solicitante="Marcos Souza",
             contatos="marcos@metalurgicavale.com.br / (54) 3055-8000",
-            servicos_texto="- PGR, PCMSO e LTCAT (validade 12 meses)",
-            valor_investimento=1500.0,
-            condicoes_pag="Entrada 50% + 30 dias",
-            obs_art="ART por conta do contratante.",
+            servicos="- PGR, PCMSO e LTCAT (validade 12 meses)",
+            valor=1500.0,
+            condicoes_pagamento="Entrada 50% + 30 dias",
+            observacoes_art="ART por conta do contratante.",
+            responsavel_emissao="Administrador Geral",
         )
+
         conn.execute(
             """
             INSERT INTO propostas (

@@ -1,8 +1,15 @@
 import sqlite3
 import pandas as pd
 import streamlit as st
-import pandas as pd
 from datetime import datetime, time, timedelta, date
+from database import conectar_db, CATEGORIAS_CLIENTE
+from utils import (
+    limpar_numeros,
+    formatar_cep,
+    consultar_cep_api,
+    validar_cnpj_algoritmo,
+    somar_tempos_formatados,
+)
 from componentes import renderizar_edicao_atividade
 
 
@@ -10,7 +17,11 @@ def _renderizar_bloco_novo_cliente_atividade():
     with st.expander("➕ Incluir Novo Cliente", expanded=False):
         st.caption("Cadastre um novo cliente rapidamente para já lançar a atividade em seguida.")
 
-        cep_rapido = st.text_input("CEP (opcional — preenche endereço ao informar 8 dígitos)", placeholder="00000-000", key="ativ_nc_cep")
+        cep_rapido = st.text_input(
+            "CEP (opcional — preenche endereço ao informar 8 dígitos)",
+            placeholder="00000-000",
+            key="ativ_nc_cep",
+        )
         cep_fmt = formatar_cep(cep_rapido)
         cep_limpo = limpar_numeros(cep_fmt)
 
@@ -95,6 +106,7 @@ def _renderizar_bloco_novo_cliente_atividade():
 
 
 def renderizar_tela_atividades():
+    st.title("📝 Lançar Atividades e Atendimentos")
 
     if "msg_sucesso_atividade" in st.session_state:
         st.success(st.session_state.msg_sucesso_atividade)
@@ -105,16 +117,28 @@ def renderizar_tela_atividades():
 
     conn = conectar_db()
     df_clientes = pd.read_sql_query("""
+        SELECT id, cnpj, razao_social, responsavel_pf
         FROM clientes
+        ORDER BY razao_social ASC
     """, conn)
     conn.close()
 
     if df_clientes.empty:
+        st.warning("Cadastre pelo menos uma empresa antes de registrar atividades.")
         return
 
+    opcoes_cli = {
+        f"{r['razao_social']} | CNPJ: {r['cnpj']}": dict(r)
+        for _, r in df_clientes.iterrows()
     }
+    chaves_cli = list(opcoes_cli.keys())
 
     idx_padrao = 0
+    pre_id = st.session_state.get("cliente_pre_selecionado_id")
+    if pre_id is not None:
+        for i_pos, k_txt in enumerate(chaves_cli):
+            if int(opcoes_cli[k_txt]["id"]) == int(pre_id):
+                idx_padrao = i_pos
                 break
         st.session_state.cliente_pre_selecionado_id = None
 
@@ -124,27 +148,76 @@ def renderizar_tela_atividades():
         st.session_state.ativ_descricao = ""
         st.session_state.limpar_desc_ativ = False
 
-    atendente_atual = st.session_state.get("nome_usuario") or st.session_state.get("usuario_atual") or "Administrador"
+    atendente_atual = (
+        st.session_state.get("nome_usuario")
+        or st.session_state.get("usuario_atual")
+        or "Administrador"
+    )
 
     st.subheader("Registrar Novo Atendimento")
     with st.container(border=True):
+        cli_lbl = st.selectbox("Empresa / Cliente *", chaves_cli, index=idx_padrao, key="ativ_sel_cliente")
+        cli_sel = opcoes_cli[cli_lbl]
 
-
+        c1, c2, c3, c4, c5 = st.columns([1.3, 1.1, 1.1, 1.3, 1.8])
         with c1:
+            data_ativ = st.date_input("Data *", value=date.today(), key="ativ_data")
         with c2:
+            hora_inicio = st.time_input(
+                "Horário Inicial (De) *",
+                value=time(9, 0),
+                step=timedelta(minutes=15),
+                key="ativ_hora_ini",
+            )
         with c3:
+            hora_fim = st.time_input(
+                "Horário Final (Até) *",
+                value=time(10, 0),
+                step=timedelta(minutes=15),
+                key="ativ_hora_fim",
+            )
 
+        dt_ini = datetime.combine(data_ativ, hora_inicio)
+        dt_fim = datetime.combine(data_ativ, hora_fim)
+        segundos = int((dt_fim - dt_ini).total_seconds())
 
         with c4:
+            if segundos > 0:
+                h = segundos // 3600
+                m = (segundos % 3600) // 60
+                tempo_total_fmt = f"{h:02d}h {m:02d}m"
+                st.metric("⏱️ Tempo Total", tempo_total_fmt)
             else:
+                tempo_total_fmt = "Inválido"
+                st.metric("⏱️ Tempo Total", "Inválido")
 
+        lista_modalidades = [
+            "WhatsApp",
+            "Telefone",
+            "Presencial / Visita Técnica",
+            "E-mail",
+            "Reunião Online",
+            "Outros",
+        ]
         with c5:
+            modalidade = st.selectbox("Modalidade *", lista_modalidades, key="ativ_modalidade")
 
+        descricao = st.text_area(
+            "Detalhamento do Atendimento / Atividade *",
+            height=110,
+            placeholder="Descreva o que foi tratado, pendências levantadas ou próximos passos...",
+            key="ativ_descricao",
+        )
 
-
-
+        if st.button("💾 Salvar Registro de Atividade", type="primary", use_container_width=True, key="btn_salvar_ativ"):
+            if segundos <= 0:
+                st.error("O Horário Final ('Até') deve ser maior que o Horário Inicial ('De').")
             elif not descricao.strip():
+                st.error("A descrição da atividade não pode ficar em branco.")
             else:
+                str_ini = hora_inicio.strftime("%H:%M")
+                str_fim = hora_fim.strftime("%H:%M")
+                periodo_str = f"{str_ini} às {str_fim}"
 
                 conn = conectar_db()
                 conn.execute("""
@@ -153,19 +226,39 @@ def renderizar_tela_atividades():
                         tempo_total, modalidade, descricao, atendente
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
+                    int(cli_sel["id"]),
+                    data_ativ.strftime("%d/%m/%Y"),
                     periodo_str,
+                    str_ini,
                     str_fim,
+                    tempo_total_fmt,
                     modalidade,
                     descricao.strip(),
+                    atendente_atual,
                 ))
                 conn.commit()
                 conn.close()
 
+                st.session_state.limpar_desc_ativ = True
+                st.session_state.msg_sucesso_atividade = (
+                    f"✅ Atividade registrada para '{cli_sel['razao_social']}' ({tempo_total_fmt})!"
+                )
                 st.rerun()
 
     st.divider()
+    st.subheader("📋 Histórico de Atividades Registradas")
+
     conn = conectar_db()
     df_hist = pd.read_sql_query("""
+        SELECT a.id as ID,
+               a.data as 'Data',
+               a.hora_inicio as 'Início',
+               a.hora_fim as 'Término',
+               a.tempo_total as 'Duração',
+               c.razao_social as 'Empresa',
+               a.modalidade as 'Modalidade',
+               a.descricao as 'Detalhamento',
+               a.atendente as 'Atendente'
         FROM atividades a
         JOIN clientes c ON a.cliente_id = c.id
         ORDER BY a.id DESC
@@ -173,4 +266,14 @@ def renderizar_tela_atividades():
     conn.close()
 
     if df_hist.empty:
+        st.info("Nenhuma atividade registrada até o momento.")
     else:
+        total_horas = somar_tempos_formatados(df_hist["Duração"])
+        m1, m2 = st.columns(2)
+        with m1:
+            st.metric("Total de Registros", len(df_hist))
+        with m2:
+            st.metric("⏱️ Tempo Acumulado", total_horas)
+
+        st.dataframe(df_hist, use_container_width=True, hide_index=True)
+        renderizar_edicao_atividade(df_hist, sufixo_key="tela_ativ")

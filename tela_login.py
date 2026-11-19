@@ -1,7 +1,8 @@
 import json
-import streamlit as st
 import sqlite3
 import pandas as pd
+import streamlit as st
+from database import conectar_db, gerar_hash_senha, obter_permissoes_perfil
 from utils import renderizar_logo_segserra
 
 TODAS_TELAS_SISTEMA = [
@@ -13,6 +14,12 @@ TODAS_TELAS_SISTEMA = [
     "Emissão de Propostas",
     "Checklist Visita Técnica",
     "Usuários e Senhas"
+]
+
+PERFIS_PADRAO = [
+    "Administrador",
+    "Comercial / Atendimento",
+    "Técnico SST"
 ]
 
 
@@ -81,7 +88,7 @@ def renderizar_tela_login():
                                 st.session_state.usuario_atual = u_login
                                 st.session_state.nome_usuario = u_nome
                                 st.session_state.perfil_usuario = u_perfil
-                                st.session_state.menu_pagina = (
+                                st.session_state.pagina_ativa = (
                                     "Dashboard" if "Dashboard" in telas_permitidas else telas_permitidas[0]
                                 )
                                 st.rerun()
@@ -90,17 +97,19 @@ def renderizar_tela_login():
 
 
 def realizar_logout():
-    for chave in ["logado", "usuario_id", "usuario_atual", "nome_usuario", "perfil_usuario"]:
+    for chave in ["logado", "usuario_id", "usuario_atual", "nome_usuario", "perfil_usuario", "pagina_ativa"]:
         st.session_state[chave] = False if chave == "logado" else None
 
 
 def renderizar_gestao_usuarios():
+    st.title("👥 Usuários e Permissões")
 
     perfil_logado = st.session_state.get("perfil_usuario", "Comercial / Atendimento")
     perms_logado = obter_permissoes_perfil(perfil_logado)
     pode_editar = perms_logado.get("pode_editar", False)
 
     if perfil_logado == "Administrador":
+        aba_equipe, aba_permissoes, aba_minha_senha = st.tabs([
             "👥 Cadastrar e Gerenciar Equipe",
             "🛡️ Permissões por Perfil",
             "🔑 Alterar Minha Senha"
@@ -109,9 +118,8 @@ def renderizar_gestao_usuarios():
         aba_equipe = None
         aba_permissoes = None
         aba_minha_senha = st.container()
-        aba_equipe = None
 
-    # --- ABA EXCLUSIVA PARA ADMINISTRADORES ---
+    # --- ABA 1: CADASTRAR E GERENCIAR EQUIPE ---
     if aba_equipe is not None:
         with aba_equipe:
             c_novo, c_editar = st.columns([1.1, 1.3])
@@ -122,6 +130,7 @@ def renderizar_gestao_usuarios():
                     novo_nome = st.text_input("Nome Completo do Colaborador *", placeholder="Ex: João Silva")
                     novo_login = st.text_input("Login de Acesso (sem espaços) *", placeholder="Ex: joao.silva")
                     nova_senha = st.text_input("Senha Inicial *", type="password")
+                    novo_perfil = st.selectbox("Perfil de Acesso *", PERFIS_PADRAO)
 
                     btn_criar = st.form_submit_button("💾 Criar Usuário", use_container_width=True, type="primary")
                     if btn_criar:
@@ -137,6 +146,7 @@ def renderizar_gestao_usuarios():
                                 """, (login_limpo, novo_nome.strip(), gerar_hash_senha(nova_senha), novo_perfil))
                                 conn.commit()
                                 conn.close()
+                                st.success(f"✅ Usuário '{login_limpo}' criado com sucesso!")
                                 st.rerun()
                             except sqlite3.IntegrityError:
                                 st.error("Este login de usuário já existe no sistema!")
@@ -151,61 +161,109 @@ def renderizar_gestao_usuarios():
                 """, conn)
                 conn.close()
 
-                opcoes_u = {
-                    f"{r['nome_completo']} ({r['usuario']}) - {'🟢 Ativo' if r['ativo'] else '🔴 Inativo'}": r
-                    for _, r in df_users.iterrows()
-                }
-                user_sel_lbl = st.selectbox("Selecione o usuário:", list(opcoes_u.keys()))
-                u_sel = opcoes_u[user_sel_lbl]
-                uid_sel = int(u_sel["id"])
+                if not df_users.empty:
+                    opcoes_u = {
+                        f"{r['nome_completo']} ({r['usuario']}) - {'🟢 Ativo' if r['ativo'] else '🔴 Inativo'}": r
+                        for _, r in df_users.iterrows()
+                    }
+                    user_sel_lbl = st.selectbox("Selecione o usuário:", list(opcoes_u.keys()), key="sel_edit_usuario_lbl")
+                    u_sel = opcoes_u[user_sel_lbl]
+                    uid_sel = int(u_sel["id"])
 
-                with st.form(f"form_edit_user_{uid_sel}"):
-                    ed_nome = st.text_input("Nome Completo", value=u_sel["nome_completo"])
-                    ed_perfil = st.selectbox("Perfil", perfis_lista, index=idx_p)
-                    ed_ativo = st.checkbox("Usuário Ativo (Permitir Login)", value=bool(u_sel["ativo"]))
+                    perfis_lista = list(PERFIS_PADRAO)
+                    if u_sel["perfil"] not in perfis_lista:
+                        perfis_lista.append(u_sel["perfil"])
+                    idx_p = perfis_lista.index(u_sel["perfil"])
 
-                    c_b1, c_b2 = st.columns(2)
-                    with c_b1:
-                    with c_b2:
-                        btn_del = st.form_submit_button("🗑️ Excluir Usuário", use_container_width=True)
+                    with st.form(f"form_edit_user_{uid_sel}"):
+                        ed_nome = st.text_input("Nome Completo", value=u_sel["nome_completo"])
+                        ed_perfil = st.selectbox("Perfil", perfis_lista, index=idx_p)
+                        ed_nova_senha = st.text_input("Nova Senha (deixe em branco para manter)", type="password")
+                        ed_ativo = st.checkbox("Usuário Ativo (Permitir Login)", value=bool(u_sel["ativo"]))
 
-                    if btn_upd:
-                        if uid_sel == st.session_state.get("usuario_id") and not ed_ativo:
-                            st.error("Você não pode desativar o seu próprio usuário logado!")
-                        else:
-                            conn = conectar_db()
-                            if ed_nova_senha.strip():
-                                conn.execute("""
-                                    UPDATE usuarios SET nome_completo=?, perfil=?, ativo=?, senha_hash=? WHERE id=?
+                        c_b1, c_b2 = st.columns(2)
+                        with c_b1:
+                            btn_upd = st.form_submit_button("💾 Salvar Alterações", use_container_width=True, type="primary")
+                        with c_b2:
+                            btn_del = st.form_submit_button("🗑️ Excluir Usuário", use_container_width=True)
+
+                        if btn_upd:
+                            if uid_sel == st.session_state.get("usuario_id") and not ed_ativo:
+                                st.error("Você não pode desativar o seu próprio usuário logado!")
+                            elif ed_nova_senha.strip() and len(ed_nova_senha.strip()) < 4:
+                                st.error("A nova senha deve ter pelo menos 4 caracteres.")
                             else:
-                                conn.execute("""
-                                    UPDATE usuarios SET nome_completo=?, perfil=?, ativo=? WHERE id=?
-                                """, (ed_nome.strip(), ed_perfil, int(ed_ativo), uid_sel))
-                            conn.commit()
-                            conn.close()
-                            st.rerun()
+                                conn = conectar_db()
+                                if ed_nova_senha.strip():
+                                    conn.execute("""
+                                        UPDATE usuarios SET nome_completo=?, perfil=?, ativo=?, senha_hash=? WHERE id=?
+                                    """, (ed_nome.strip(), ed_perfil, int(ed_ativo), gerar_hash_senha(ed_nova_senha.strip()), uid_sel))
+                                else:
+                                    conn.execute("""
+                                        UPDATE usuarios SET nome_completo=?, perfil=?, ativo=? WHERE id=?
+                                    """, (ed_nome.strip(), ed_perfil, int(ed_ativo), uid_sel))
+                                conn.commit()
+                                conn.close()
+                                st.success("✅ Usuário atualizado com sucesso!")
+                                st.rerun()
 
-                    if btn_del:
-                        if uid_sel == st.session_state.get("usuario_id"):
-                            st.error("Você não pode excluir o seu próprio usuário enquanto estiver logado!")
-                        elif u_sel["usuario"] == "admin":
-                            st.error("O usuário 'admin' principal não pode ser excluído.")
-                        else:
-                            conn = conectar_db()
-                            conn.execute("DELETE FROM usuarios WHERE id=?", (uid_sel,))
-                            conn.commit()
-                            conn.close()
-                            st.rerun()
+                        if btn_del:
+                            if uid_sel == st.session_state.get("usuario_id"):
+                                st.error("Você não pode excluir o seu próprio usuário enquanto estiver logado!")
+                            elif u_sel["usuario"] == "admin":
+                                st.error("O usuário 'admin' principal não pode ser excluído.")
+                            else:
+                                conn = conectar_db()
+                                conn.execute("DELETE FROM usuarios WHERE id=?", (uid_sel,))
+                                conn.commit()
+                                conn.close()
+                                st.success("🗑️ Usuário excluído com sucesso!")
+                                st.rerun()
 
             st.divider()
             st.subheader("📋 Lista de Usuários Cadastrados")
-            df_exib = df_users.copy()
-            df_exib["Status"] = df_exib["ativo"].apply(lambda x: "🟢 Ativo" if x == 1 else "🔴 Inativo")
-            df_exib = df_exib.rename(columns={
-                "id": "ID", "usuario": "Login", "nome_completo": "Nome Completo", "perfil": "Perfil de Acesso"
-            })[["ID", "Nome Completo", "Login", "Perfil de Acesso", "Status"]]
-            st.dataframe(df_exib, use_container_width=True, hide_index=True)
+            conn = conectar_db()
+            df_exib = pd.read_sql_query("""
+                SELECT id, usuario, nome_completo, perfil, ativo 
+                FROM usuarios 
+                ORDER BY id ASC
+            """, conn)
+            conn.close()
+            if not df_exib.empty:
+                df_exib["Status"] = df_exib["ativo"].apply(lambda x: "🟢 Ativo" if x == 1 else "🔴 Inativo")
+                df_exib = df_exib.rename(columns={
+                    "id": "ID", "usuario": "Login", "nome_completo": "Nome Completo", "perfil": "Perfil de Acesso"
+                })[["ID", "Nome Completo", "Login", "Perfil de Acesso", "Status"]]
+                st.dataframe(df_exib, use_container_width=True, hide_index=True)
 
+    # --- ABA 2: PERMISSÕES POR PERFIL ---
+    if aba_permissoes is not None:
+        with aba_permissoes:
+            st.subheader("🛡️ Permissões por Perfil de Acesso")
+            perfil_alvo = st.selectbox("Selecione o perfil para configurar:", PERFIS_PADRAO, key="sel_perfil_perm")
+            perms_atuais = obter_permissoes_perfil(perfil_alvo)
+
+            telas_marcas_padrao = [t for t in (perms_atuais.get("telas") or []) if t in TODAS_TELAS_SISTEMA]
+            with st.form(f"form_perm_{perfil_alvo}"):
+                telas_escolhidas = st.multiselect(
+                    "Telas autorizadas no menu:",
+                    TODAS_TELAS_SISTEMA,
+                    default=telas_marcas_padrao
+                )
+                c_p1, c_p2 = st.columns(2)
+                with c_p1:
+                    perm_editar = st.checkbox("Pode alterar/editar registros", value=bool(perms_atuais.get("pode_editar", False)))
+                with c_p2:
+                    perm_excluir = st.checkbox("Pode excluir registros", value=bool(perms_atuais.get("pode_excluir", False)))
+
+                if st.form_submit_button("💾 Salvar Permissões do Perfil", type="primary"):
+                    if perfil_alvo == "Administrador" and "Usuários e Senhas" not in telas_escolhidas:
+                        telas_escolhidas.append("Usuários e Senhas")
+                    _salvar_permissoes_no_banco(perfil_alvo, telas_escolhidas, perm_editar, perm_excluir)
+                    st.success(f"✅ Permissões do perfil '{perfil_alvo}' salvas!")
+                    st.rerun()
+
+    # --- ABA 3: ALTERAR MINHA SENHA ---
     with aba_minha_senha:
         st.subheader("🔑 Alterar Minha Senha de Acesso")
         if not pode_editar and perfil_logado != "Administrador":
